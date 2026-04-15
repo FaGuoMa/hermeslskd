@@ -1,7 +1,7 @@
 ---
 name: slskd
 description: Download a Spotify track from Soulseek via slskd — resolves track metadata, searches for FLAC or MP3 320kbps, and queues the best match for download
-version: 1.0.0
+version: 1.1.0
 author: max
 platforms: [linux]
 metadata:
@@ -22,36 +22,39 @@ metadata:
 
 Download music from Soulseek when given a Spotify track link. Searches for high-quality files (FLAC or MP3 ≥ 320 kbps) and queues the best match in your slskd instance.
 
+## How the search works
+
+Soulseek search is bare-bones: no boolean operators, no filetype filters, extremely sensitive to exact phrasing.  The script compensates with this strategy:
+
+- **Search uses the track title only** (never "Artist - Title") — a shorter, cleaner query hits more peers
+- **Artist name is a soft validator** — results whose file path contains the artist name are ranked above those that don't, but are not excluded (so a FLAC without the artist in the path beats an MP3 that has it)
+- **Accents and special characters are stripped** before the query is sent ("Björk" → "Bjork", "Ñoño" → "Nono")
+- **Parenthetical version info is dropped** from the search query ("Bohemian Rhapsody (Remastered 2011)" → "Bohemian Rhapsody")
+- **Two attempts maximum**: if the title-only search returns zero qualifying results, the script waits 8 seconds (rate-limit) and retries with "artist title"; it never fires more than two searches
+
 ## Setup
 
 ```bash
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+
+# Locate the skill directory (works whether installed in default or external_dirs)
 SKILL_DIR="$(python3 -c "
-import os, sys
+import os, sys, yaml
 home = os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes'))
-# Check external_dirs first, then default skills path
-for base in [home]:
-    for candidate in [
-        os.path.join(base, 'skills', 'slskd'),
-        os.path.join(base, '..', 'hermeslskd', 'slskd'),
-    ]:
+cfg_path = os.path.join(home, 'config.yaml')
+search_bases = [home]
+if os.path.isfile(cfg_path):
+    cfg = yaml.safe_load(open(cfg_path)) or {}
+    for d in (cfg.get('skills') or {}).get('external_dirs') or []:
+        search_bases.append(os.path.expanduser(d))
+for base in search_bases:
+    for candidate in [os.path.join(base, 'skills', 'slskd'), os.path.join(base, 'slskd')]:
         if os.path.isfile(os.path.join(candidate, 'SKILL.md')):
-            print(candidate)
-            sys.exit(0)
-# Fallback: search external_dirs from config
-import yaml
-cfg = os.path.join(home, 'config.yaml')
-if os.path.isfile(cfg):
-    data = yaml.safe_load(open(cfg))
-    for d in (data.get('skills', {}).get('external_dirs') or []):
-        candidate = os.path.join(os.path.expanduser(d), 'slskd')
-        if os.path.isfile(os.path.join(candidate, 'SKILL.md')):
-            print(candidate)
-            sys.exit(0)
+            print(candidate); sys.exit(0)
 print('')
 ")"
 
-PYTHON_BIN="${HERMES_HOME}/hermes-agent/venv/bin/python3"
+PYTHON_BIN="$HERMES_HOME/hermes-agent/venv/bin/python3"
 if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="python3"
 fi
@@ -62,7 +65,7 @@ SLSKD_SCRIPT="$SKILL_DIR/scripts/slskd_download.py"
 
 ## Workflow
 
-When the user invokes `/slskd <spotify_url>`, follow these steps in order:
+When the user invokes `/slskd <spotify_url>`:
 
 ### Step 1 — Extract track metadata
 
@@ -71,54 +74,76 @@ TRACK_INFO=$("$PYTHON_BIN" "$SPOTIFY_SCRIPT" "<spotify_url>")
 echo "$TRACK_INFO"
 ```
 
-Parse the JSON output:
-- `query` — the search string to use (e.g. `"Queen - Bohemian Rhapsody"`)
-- `artist` — artist name (may be empty if extraction failed)
-- `title` — track title
+Parse the JSON. Extract:
+- `title` — track title (may include version suffix like "Remastered 2011" — the script handles stripping it)
+- `artist` — artist name (used as a soft validator, not a search term)
 
-If the script fails (exit code 1 or `error` key present), report the error and **still attempt the download using the raw title** extracted manually from the URL if possible, or ask the user to provide the artist and title.
+If the script exits non-zero or returns `{"error": "..."}`:
+- Try to extract a plain title from the URL itself
+- Proceed with just the title (no artist validation)
 
 ### Step 2 — Search and download
 
 ```bash
 SLSKD_HOST="<slskd.host>" SLSKD_PORT="<slskd.port>" \
-  "$PYTHON_BIN" "$SLSKD_SCRIPT" "<query>"
+  "$PYTHON_BIN" "$SLSKD_SCRIPT" \
+    --title "<title>" \
+    --artist "<artist>"
 ```
 
-Replace `<slskd.host>` and `<slskd.port>` with the values from the skill config above.
+Replace `<slskd.host>` and `<slskd.port>` with the values injected from skill config.
+Pass the raw title and artist exactly as returned by `spotify_info.py` — the download script handles all cleaning internally.
 
-### Step 3 — Report result
+If artist is unknown or empty, omit `--artist` entirely.
 
-Parse the JSON output and reply to the user:
+### Step 3 — Report result to user
 
-**Success:**
+Parse the JSON output:
+
+**Success (`"success": true`):**
 ```
-Queued: <file> [FLAC / MP3 320] from <user> (<size_mb> MB)
+Queued: <file> [<FORMAT> / <bitrate> kbps] from <user> (<size_mb> MB)
+```
+- If `artist_validated` is false: add a note — "⚠ artist not confirmed in filename"
+- If `attempt` is 2: add a note — "found on retry search"
+
+**No quality match (`"reason": "no_quality_match"`):**
+```
+No FLAC or MP3 320+ found for "<title>". Best available was <best_found>. Not downloading.
 ```
 
-**No quality match:**
+**Error (`"reason": "error"`):**
 ```
-No FLAC or MP3 320+ found for "<query>".
-Best available was <best_found> — below quality floor. Not downloading.
-```
-
-**Error:**
-```
-Download failed: <error message>
+Download failed: <error>
 ```
 
 ## Example
 
-User: `/slskd https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT`
+User: `/slskd https://open.spotify.com/track/4u7EnebtmKWzUH433cf5Qv`
 
-1. Run `spotify_info.py` → `{"artist": "Queen", "title": "Bohemian Rhapsody", "query": "Queen - Bohemian Rhapsody"}`
-2. Run `slskd_download.py "Queen - Bohemian Rhapsody"` → `{"success": true, "file": "Queen - Bohemian Rhapsody.flac", "format": "flac", "user": "somepeer", "size_mb": 42.3}`
-3. Reply: "Queued: Queen - Bohemian Rhapsody.flac [FLAC] from somepeer (42.3 MB)"
+```bash
+# Step 1
+"$PYTHON_BIN" "$SPOTIFY_SCRIPT" "https://open.spotify.com/track/4u7EnebtmKWzUH433cf5Qv"
+# → {"artist": "Queen", "title": "Bohemian Rhapsody - Remastered 2011", "query": "Queen - Bohemian Rhapsody - Remastered 2011"}
+
+# Step 2 — pass title and artist separately
+SLSKD_HOST="192.168.1.110" SLSKD_PORT="5030" \
+  "$PYTHON_BIN" "$SLSKD_SCRIPT" \
+    --title "Bohemian Rhapsody - Remastered 2011" \
+    --artist "Queen"
+# Script searches for "Bohemian Rhapsody" (stripped), validates against "Queen" in path
+# → {"success": true, "file": "01 - Bohemian Rhapsody.flac", "format": "flac",
+#    "bitrate": null, "user": "somepeer", "size_mb": 42.3,
+#    "artist_validated": true, "attempt": 1}
+```
+
+Reply: "Queued: 01 - Bohemian Rhapsody.flac [FLAC] from somepeer (42.3 MB)"
 
 ## Rules
 
-1. **Quality floor is strict** — never download MP3 below 320 kbps or non-FLAC/MP3 formats (no `.ogg`, `.wma`, `.aac`, `.m4a`). The script enforces this but do not override it.
-2. **The download is queued, not instant** — always say "queued" not "downloaded" in the success message.
-3. **If `SLSKD_API_KEY` is missing** — report: "SLSKD_API_KEY is not set in ~/.hermes/.env. Please add it and try again."
-4. **If Spotify metadata extraction fails** — still attempt the download using the title extracted from the URL (e.g. from the page title), or ask the user for the search query.
-5. **Do not modify the scripts** — if something is broken, report it so the user can fix it.
+1. **Pass title and artist as separate arguments** — never combine them into one string before passing to the script; the script decides how to use each.
+2. **Quality floor is strict** — MP3 < 320 kbps and non-FLAC/MP3 formats are silently rejected by the script.
+3. **The download is queued, not instant** — say "queued" not "downloaded".
+4. **Two searches max** — the script already enforces this; do not call it in a loop.
+5. **If `SLSKD_API_KEY` is missing** — report: "SLSKD_API_KEY is not set in ~/.hermes/.env"
+6. **If Spotify metadata extraction fails** — still attempt the download using just the title.

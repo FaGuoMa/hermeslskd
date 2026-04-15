@@ -41,11 +41,20 @@ JSON output on stdout:
 """
 import argparse
 import json
+import logging
 import os
 import re
 import sys
 import time
 import unicodedata
+
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("slskd")
 
 try:
     from slskd_api import SlskdClient
@@ -72,6 +81,7 @@ POLL_INTERVAL_S = 2             # polling cadence while waiting for results
 MAX_POLL_S = 25                 # give up polling after this
 RESPONSE_LIMIT = 200            # max peers per search
 BETWEEN_SEARCH_DELAY_S = 8      # pause between attempt 1 and attempt 2
+BETWEEN_ENQUEUE_DELAY_S = 5     # pause between enqueue retries (Soulseek anti-spam)
 
 # ---------------------------------------------------------------------------
 # Text normalisation
@@ -321,6 +331,7 @@ def _do_search(client, query: str, title: str, artist: str, expected_duration_s=
 
     Raises on hard errors so the caller can decide whether to retry.
     """
+    log.debug("search query=%r title=%r artist=%r", query, title, artist)
     search = client.searches.search_text(
         query,
         searchTimeout=SEARCH_TIMEOUT_MS,
@@ -347,6 +358,8 @@ def _do_search(client, query: str, title: str, artist: str, expected_duration_s=
 
     if not isinstance(responses, list):
         responses = []
+
+    log.debug("search complete: %d peer responses", len(responses))
 
     # Clean up from slskd UI
     try:
@@ -382,6 +395,7 @@ def _do_search(client, query: str, title: str, artist: str, expected_duration_s=
                 "_raw": f,
             })
 
+    log.debug("candidates after quality filter: %d", len(candidates))
     return candidates, responses
 
 
@@ -404,6 +418,8 @@ def run(title: str, artist: str = "", duration_s: int = None) -> dict:
     clean_title = clean_for_search(title)
     clean_artist = clean_for_search(artist) if artist else ""
     expected_duration_s = duration_s  # may be None
+    log.debug("run title=%r artist=%r clean_title=%r clean_artist=%r duration_s=%s",
+              title, artist, clean_title, clean_artist, duration_s)
 
     # ---- Attempt 1: title only ----
     query1 = clean_title
@@ -411,7 +427,11 @@ def run(title: str, artist: str = "", duration_s: int = None) -> dict:
     try:
         candidates, responses = _do_search(client, query1, title, artist, expected_duration_s)
     except Exception as e:
-        return {"success": False, "reason": "error", "error": str(e)}
+        msg = str(e)
+        if "409" in msg:
+            return {"success": False, "reason": "error",
+                    "error": "slskd search rate limit hit — too many searches in a short window, try again in a minute"}
+        return {"success": False, "reason": "error", "error": msg}
 
     attempt = 1
 
@@ -435,14 +455,59 @@ def run(title: str, artist: str = "", duration_s: int = None) -> dict:
         }
 
     candidates.sort(key=_rank_key)
-    best = candidates[0]
+    for i, c in enumerate(candidates[:5]):
+        log.debug("  #%d %s [%s] title_ok=%s artist_ok=%s variant=%s rank=%s",
+                  i+1, c["filename"], c["format"],
+                  c["title_ok"], c["artist_ok"], c["variant"], _rank_key(c))
 
-    try:
-        client.transfers.enqueue(best["username"], [best["_raw"]])
-    except Exception as e:
+    # Try artist-validated candidates first, then fall back to the full list
+    artist_ok = [c for c in candidates if c["artist_ok"]]
+    rest = [c for c in candidates if not c["artist_ok"]]
+    pool = artist_ok + rest
+
+    MAX_ENQUEUE_TRIES = 3           # keep low — rapid retries can trigger Soulseek anti-spam
+    best = None
+    last_enqueue_error = ""
+    enqueue_tries = 0
+    failed_users: set[str] = set()   # skip repeat users after any failure
+    for candidate in pool:
+        if enqueue_tries >= MAX_ENQUEUE_TRIES:
+            log.debug("reached max enqueue attempts (%d)", MAX_ENQUEUE_TRIES)
+            break
+
+        username = candidate["username"]
+        if username in failed_users:
+            log.debug("skipping already-failed user %s", username)
+            continue
+
+        if enqueue_tries > 0:
+            log.debug("waiting %ds before next enqueue attempt", BETWEEN_ENQUEUE_DELAY_S)
+            time.sleep(BETWEEN_ENQUEUE_DELAY_S)
+
+        enqueue_tries += 1
+        log.debug("trying enqueue [%d/%d]: %s / %s",
+                  enqueue_tries, MAX_ENQUEUE_TRIES, username, candidate["filename"])
+        payload = {"filename": candidate["filename"], "size": candidate["size"]}
+        try:
+            ok = client.transfers.enqueue(username, [payload])
+        except Exception as e:
+            last_enqueue_error = str(e)
+            log.warning("enqueue exception for %s / %s: %s", username, candidate["filename"], e)
+            failed_users.add(username)
+            continue
+        if not ok:
+            last_enqueue_error = f"HTTP error for {username}"
+            log.warning("enqueue rejected for %s / %s", username, candidate["filename"])
+            failed_users.add(username)
+            continue
+        best = candidate
+        log.debug("enqueue ok: %s / %s", username, candidate["filename"])
+        break
+
+    if best is None:
         return {
             "success": False, "reason": "error",
-            "error": f"Enqueue failed ({best['username']} / {best['filename']}): {e}",
+            "error": f"All enqueue attempts failed. Last error: {last_enqueue_error}",
         }
 
     # Soulseek paths use Windows backslashes; os.path.basename only splits on /

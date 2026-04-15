@@ -3,7 +3,7 @@ name: slskd
 description: Download a Spotify track from Soulseek via slskd — resolves track metadata, searches for FLAC or MP3 320kbps, and queues the best match for download
 version: 1.1.0
 author: max
-platforms: [linux]
+platforms: [linux, telegram]
 metadata:
   hermes:
     tags: [music, download, soulseek, spotify, flac]
@@ -145,5 +145,6 @@ Reply: "Queued: 01 - Bohemian Rhapsody.flac [FLAC] from somepeer (42.3 MB)"
 2. **Quality floor is strict** — MP3 < 320 kbps and non-FLAC/MP3 formats are silently rejected by the script.
 3. **The download is queued, not instant** — say "queued" not "downloaded".
 4. **Two searches max** — the script already enforces this; do not call it in a loop.
-5. **If `SLSKD_API_KEY` is missing** — report: "SLSKD_API_KEY is not set in ~/.hermes/.env"
-6. **If Spotify metadata extraction fails** — still attempt the download using just the title.
+5. **Three enqueue attempts max, 5s apart** — rapid enqueue retries trigger Soulseek's anti-spam protection and cause disconnection.
+6. **If `SLSKD_API_KEY` is missing** — report: "SLSKD_API_KEY is not set in ~/.hermes/.env"
+7. **If Spotify metadata extraction fails** — still attempt the download using just the title.

@@ -43,6 +43,7 @@ def get_track_info(url: str) -> dict:
 
     title = ""
     artist = ""
+    duration_s = None
 
     # -- Primary: embed page __NEXT_DATA__ JSON (no auth required) --
     try:
@@ -69,6 +70,10 @@ def get_track_info(url: str) -> dict:
             artists = entity.get("artists", [])
             if artists:
                 artist = ", ".join(a["name"] for a in artists if a.get("name"))
+            # Duration in milliseconds → seconds
+            dur_ms = entity.get("duration")
+            if dur_ms:
+                duration_s = int(dur_ms) // 1000
     except Exception:
         pass
 
@@ -89,7 +94,10 @@ def get_track_info(url: str) -> dict:
         raise RuntimeError("Could not extract track title from Spotify URL")
 
     query = f"{artist} - {title}" if artist else title
-    return {"artist": artist, "title": title, "query": query}
+    result = {"artist": artist, "title": title, "query": query}
+    if duration_s is not None:
+        result["duration_s"] = duration_s
+    return result
 
 
 def main():

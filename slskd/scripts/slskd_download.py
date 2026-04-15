@@ -137,6 +137,94 @@ def _primary_artist(artist: str) -> str:
                     flags=re.IGNORECASE)[0].strip()
 
 
+def title_score(filepath: str, title: str) -> int:
+    """Return 1 if the cleaned title appears in the filename (not the full path).
+
+    Uses only the last path component so we don't match directory names from
+    albums/compilations that share the title (e.g. the 'Bohemian Rhapsody'
+    movie soundtrack directory).
+    """
+    if not title:
+        return 0
+    # Only check the filename, not the full directory path
+    basename = filepath.replace("\\", "/").split("/")[-1]
+    base_n = _strip_accents(basename.lower())
+    title_n = _strip_accents(clean_for_search(title).lower())
+    if not title_n:
+        return 0
+    # Direct substring
+    if title_n in base_n:
+        return 1
+    # All significant words (> 2 chars) present in the filename
+    words = [w for w in re.split(r"[\s\-_]+", title_n) if len(w) > 2]
+    if words and all(w in base_n for w in words):
+        return 1
+    return 0
+
+
+# Keywords that signal a non-standard/variant recording — penalised in ranking.
+# Remastered/deluxe/anniversary are NOT listed: those are still the studio take.
+_VARIANT_RE = re.compile(
+    r"\b("
+    r"live|concert|tour|bootleg"
+    r"|acoustic|unplugged|stripped"
+    r"|piano|orchestral|instrumental|a[ _-]?cappella|cappella"
+    r"|demo|rehearsal|outtake|alternate|alternative"
+    r"|remix|remixed|rmx|edit|radio[ _-]?edit|single[ _-]?edit"
+    r"|cover|tribute|karaoke|backing[ _-]?track"
+    r"|medley|suite|reprise|excerpt|intro|outro|snippet"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def variant_penalty(filename: str, title: str) -> int:
+    """Return 1 if the filename contains variant keywords outside the title itself.
+
+    Strategy: strip the cleaned title words from the basename, then check whether
+    any variant keyword remains in what's left.  This avoids penalising a track
+    called 'Live and Let Die' while still catching 'Bohemian Rhapsody (Live)'.
+    """
+    basename = filename.replace("\\", "/").split("/")[-1]
+    base_n = _strip_accents(re.sub(r"[^\w\s]", " ", basename.lower()))
+    title_n = _strip_accents(clean_for_search(title).lower())
+    # Blank out title words in basename so we only inspect the suffix/extra parts
+    for word in re.split(r"\s+", title_n):
+        if len(word) > 2:
+            base_n = base_n.replace(word, " ")
+    return 1 if _VARIANT_RE.search(base_n) else 0
+
+
+def _dur_tier(length_s, expected_s, tolerance_s=45) -> int:
+    """Return 0 if within tolerance of expected duration, 1 otherwise.
+
+    If expected_s is None (unknown), always returns 0 (no penalty).
+    If length_s is None (not reported by peer), returns 0 (benefit of the doubt).
+    """
+    if expected_s is None or length_s is None:
+        return 0
+    return 0 if abs(int(length_s) - int(expected_s)) <= tolerance_s else 1
+
+
+def _size_tier(size: int, fmt: str) -> int:
+    """Classify file size into 0=normal, 1=oversized, 2=too-small.
+
+    Extremes are deprioritised: a 3 MB 'FLAC' is likely a short jingle,
+    a 900 MB FLAC is likely a 24-bit hi-res or full album rip.
+    Normal range per format:
+      FLAC  : 8 MB – 300 MB
+      MP3   : 3 MB – 60 MB
+    """
+    mb = size / (1024 * 1024) if size else 0
+    if fmt == "flac":
+        if mb < 8:   return 2
+        if mb > 300: return 1
+    else:
+        if mb < 3:   return 2
+        if mb > 60:  return 1
+    return 0
+
+
 def artist_score(filepath: str, artist: str) -> int:
     """Return 1 if the artist seems to appear in the file path, else 0.
 
@@ -184,16 +272,23 @@ def _is_accepted(f: dict) -> bool:
 def _rank_key(c: dict) -> tuple:
     """
     Priority (lowest tuple = best):
-      1. artist validated
-      2. FLAC before MP3
-      3. upload slot open
-      4. larger file
+      1. title found in filename  — strongest signal we have the right track
+      2. duration within ±45s of expected (if known) — filters live/partial versions
+      3. artist found in path     — confirms it's the right artist
+      4. size tier                — 0=normal, 1=oversized, 2=too-small
+      5. FLAC before MP3
+      6. upload slot open
+      7. size within tier         — prefer smaller within the same tier (avoid huge rips)
     """
     return (
-        0 if c["artist_ok"] else 1,
-        0 if c["format"] == "flac" else 1,
-        0 if c["slot_open"] else 1,
-        -(c["size"] or 0),
+        0 if c["title_ok"] else 1,   # 1. title in filename
+        c["dur_tier"],               # 2. duration within ±45s
+        c["variant"],                # 3. no live/piano/demo/etc. in filename
+        0 if c["artist_ok"] else 1, # 4. artist in path
+        c["size_tier"],              # 5. reasonable file size
+        0 if c["format"] == "flac" else 1,  # 6. FLAC > MP3
+        0 if c["slot_open"] else 1, # 7. slot open
+        c["size"] or 0,              # 8. smaller within tier
     )
 
 
@@ -221,7 +316,7 @@ def _best_found_info(responses: list) -> str:
 # Single search + filter pass
 # ---------------------------------------------------------------------------
 
-def _do_search(client, query: str, artist: str) -> tuple[list, list]:
+def _do_search(client, query: str, title: str, artist: str, expected_duration_s=None) -> tuple[list, list]:
     """Run one search, return (candidates, raw_responses).
 
     Raises on hard errors so the caller can decide whether to retry.
@@ -268,14 +363,22 @@ def _do_search(client, query: str, artist: str) -> tuple[list, list]:
                 continue
             ext = _normalise_ext(f)
             filename = f.get("filename", "")
+            size = f.get("size") or 0
+            length = f.get("length")   # seconds, may be None
+            fmt = "flac" if ext == ".flac" else "mp3"
             candidates.append({
                 "username": username,
                 "filename": filename,
-                "size": f.get("size") or 0,
+                "size": size,
                 "bitrate": f.get("bitRate"),
-                "format": "flac" if ext == ".flac" else "mp3",
+                "length": length,
+                "format": fmt,
                 "slot_open": slot_open,
+                "title_ok": bool(title_score(filename, title)),
                 "artist_ok": bool(artist_score(filename, artist)),
+                "variant": variant_penalty(filename, title),
+                "size_tier": _size_tier(size, fmt),
+                "dur_tier": _dur_tier(length, expected_duration_s),
                 "_raw": f,
             })
 
@@ -286,7 +389,7 @@ def _do_search(client, query: str, artist: str) -> tuple[list, list]:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(title: str, artist: str = "") -> dict:
+def run(title: str, artist: str = "", duration_s: int = None) -> dict:
     if not API_KEY:
         return {
             "success": False, "reason": "error",
@@ -300,12 +403,13 @@ def run(title: str, artist: str = "") -> dict:
 
     clean_title = clean_for_search(title)
     clean_artist = clean_for_search(artist) if artist else ""
+    expected_duration_s = duration_s  # may be None
 
     # ---- Attempt 1: title only ----
     query1 = clean_title
     candidates, responses = [], []
     try:
-        candidates, responses = _do_search(client, query1, artist)
+        candidates, responses = _do_search(client, query1, title, artist, expected_duration_s)
     except Exception as e:
         return {"success": False, "reason": "error", "error": str(e)}
 
@@ -316,7 +420,7 @@ def run(title: str, artist: str = "") -> dict:
         time.sleep(BETWEEN_SEARCH_DELAY_S)
         query2 = f"{clean_artist} {clean_title}"
         try:
-            candidates, responses = _do_search(client, query2, artist)
+            candidates, responses = _do_search(client, query2, title, artist, expected_duration_s)
             attempt = 2
         except Exception as e:
             # Don't mask attempt-1 "nothing found" behind a retry error
@@ -341,16 +445,22 @@ def run(title: str, artist: str = "") -> dict:
             "error": f"Enqueue failed ({best['username']} / {best['filename']}): {e}",
         }
 
+    # Soulseek paths use Windows backslashes; os.path.basename only splits on /
+    full_path = best["filename"]
+    basename = full_path.replace("\\", "/").split("/")[-1]
+
     size_mb = round(best["size"] / (1024 * 1024), 1) if best["size"] else None
     return {
         "success": True,
-        "file": os.path.basename(best["filename"]),
-        "full_path": best["filename"],
+        "file": basename,
+        "full_path": full_path,
         "format": best["format"],
         "bitrate": best["bitrate"],
         "user": best["username"],
         "size_mb": size_mb,
         "slot_open": best["slot_open"],
+        "length_s": best["length"],
+        "title_validated": best["title_ok"],
         "artist_validated": best["artist_ok"],
         "attempt": attempt,
     }
@@ -360,9 +470,10 @@ def main():
     parser = argparse.ArgumentParser(description="Download a track from Soulseek via slskd")
     parser.add_argument("--title", required=True, help="Track title (from Spotify metadata)")
     parser.add_argument("--artist", default="", help="Artist name (used as post-filter, not search term)")
+    parser.add_argument("--duration_s", type=int, default=None, help="Expected track duration in seconds (from Spotify)")
     args = parser.parse_args()
 
-    result = run(title=args.title, artist=args.artist)
+    result = run(title=args.title, artist=args.artist, duration_s=args.duration_s)
     print(json.dumps(result))
     sys.exit(0 if result.get("success") or result.get("reason") == "no_quality_match" else 1)
 

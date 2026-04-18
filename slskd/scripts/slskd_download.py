@@ -26,7 +26,7 @@ Usage:
 
 Environment variables:
     SLSKD_API_KEY   (required)
-    SLSKD_HOST      (default: 192.168.1.110)
+    SLSKD_HOST      (default: localhost)
     SLSKD_PORT      (default: 5030)
 
 Exit 0 on success or clean no-match, 1 on hard error.
@@ -78,7 +78,7 @@ except ImportError as _e:
 # Config
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("SLSKD_API_KEY", "")
-_HOST = os.environ.get("SLSKD_HOST", "192.168.1.110")
+_HOST = os.environ.get("SLSKD_HOST", "localhost")
 _PORT = os.environ.get("SLSKD_PORT", "5030")
 HOST = f"http://{_HOST}:{_PORT}" if not _HOST.startswith("http") else _HOST
 

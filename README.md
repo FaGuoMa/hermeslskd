@@ -49,7 +49,7 @@ SPOTIFY_CLIENT_ID=your_spotify_client_id
 SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
 ```
 
-**3. Set your slskd host** — the skill defaults to `192.168.1.110:5030`. Override in the Hermes skill config or via environment variables `SLSKD_HOST` / `SLSKD_PORT`.
+**3. Set your slskd host** — the skill defaults to `localhost:5030`. Override in the Hermes skill config or via environment variables `SLSKD_HOST` / `SLSKD_PORT`.
 
 ## Usage
 

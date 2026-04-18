@@ -8,7 +8,7 @@ Usage:
 
 Environment variables:
     SLSKD_API_KEY   (required)
-    SLSKD_HOST      (default: 192.168.1.110)
+    SLSKD_HOST      (default: localhost)
     SLSKD_PORT      (default: 5030)
 
 JSON output on stdout:

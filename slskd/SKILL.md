@@ -10,7 +10,7 @@ metadata:
     config:
       - key: slskd.host
         description: slskd server hostname or IP address
-        default: "192.168.1.110"
+        default: "localhost"
         prompt: "slskd server host?"
       - key: slskd.port
         description: slskd server port
@@ -158,7 +158,7 @@ User: `/slskd https://open.spotify.com/track/4u7EnebtmKWzUH433cf5Qv`
 # → {"artist": "Queen", "title": "Bohemian Rhapsody - Remastered 2011", "query": "Queen - Bohemian Rhapsody - Remastered 2011"}
 
 # Step 2 — pass title and artist separately
-SLSKD_HOST="192.168.1.110" SLSKD_PORT="5030" \
+SLSKD_HOST="localhost" SLSKD_PORT="5030" \
   "$PYTHON_BIN" "$SLSKD_SCRIPT" \
     --title "Bohemian Rhapsody - Remastered 2011" \
     --artist "Queen"

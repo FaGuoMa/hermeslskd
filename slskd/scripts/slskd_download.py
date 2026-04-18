@@ -58,15 +58,21 @@ log = logging.getLogger("slskd")
 
 try:
     from slskd_api import SlskdClient
-except ImportError:
-    print(json.dumps({
-        "success": False, "reason": "error",
-        "error": (
-            "slskd-api not installed. Run: "
-            "uv pip install slskd-api --python ~/.hermes/hermes-agent/venv/bin/python3"
-        ),
-    }))
-    sys.exit(1)
+    from peers import record_download, is_known_peer, download_count
+except ImportError as _e:
+    if "slskd_api" in str(_e):
+        print(json.dumps({
+            "success": False, "reason": "error",
+            "error": (
+                "slskd-api not installed. Run: "
+                "uv pip install slskd-api --python ~/.hermes/hermes-agent/venv/bin/python3"
+            ),
+        }))
+        sys.exit(1)
+    # peers.py missing — define no-op stubs so the rest of the script still works
+    def record_download(*a, **kw): pass
+    def is_known_peer(u): return False
+    def download_count(u): return 0
 
 # ---------------------------------------------------------------------------
 # Config
@@ -392,6 +398,7 @@ def _do_search(client, query: str, title: str, artist: str, expected_duration_s=
                 "variant": variant_penalty(filename, title),
                 "size_tier": _size_tier(size, fmt),
                 "dur_tier": _dur_tier(length, expected_duration_s),
+                "known_peer": is_known_peer(username),
                 "_raw": f,
             })
 
@@ -460,9 +467,12 @@ def run(title: str, artist: str = "", duration_s: int = None) -> dict:
                   i+1, c["filename"], c["format"],
                   c["title_ok"], c["artist_ok"], c["variant"], _rank_key(c))
 
-    # Try artist-validated candidates first, then fall back to the full list
+    # Try artist-validated candidates first, then fall back to the full list.
+    # Within each group, known peers bubble up as a tiebreaker.
     artist_ok = [c for c in candidates if c["artist_ok"]]
     rest = [c for c in candidates if not c["artist_ok"]]
+    for group in (artist_ok, rest):
+        group.sort(key=lambda c: (0 if c["known_peer"] else 1,) + _rank_key(c))
     pool = artist_ok + rest
 
     MAX_ENQUEUE_TRIES = 3           # keep low — rapid retries can trigger Soulseek anti-spam
@@ -515,6 +525,9 @@ def run(title: str, artist: str = "", duration_s: int = None) -> dict:
     basename = full_path.replace("\\", "/").split("/")[-1]
 
     size_mb = round(best["size"] / (1024 * 1024), 1) if best["size"] else None
+    known = best["known_peer"]
+    prior_count = download_count(best["username"])
+    record_download(best["username"], basename, best["format"], size_mb)
     return {
         "success": True,
         "file": basename,
@@ -528,6 +541,8 @@ def run(title: str, artist: str = "", duration_s: int = None) -> dict:
         "title_validated": best["title_ok"],
         "artist_validated": best["artist_ok"],
         "attempt": attempt,
+        "known_peer": known,
+        "peer_download_count": prior_count,
     }
 
 

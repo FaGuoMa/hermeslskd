@@ -105,6 +105,7 @@ Parse the JSON output:
 ```
 Queued: <file> [<FORMAT> / <bitrate> kbps] from <user> (<size_mb> MB)
 ```
+- If `known_peer` is true: add "(known peer, <peer_download_count> previous downloads)"
 - If `artist_validated` is false: add a note — "⚠ artist not confirmed in filename"
 - If `attempt` is 2: add a note — "found on retry search"
 

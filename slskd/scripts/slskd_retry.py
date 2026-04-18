@@ -99,7 +99,8 @@ def get_failed_downloads(client: SlskdClient) -> list[dict]:
     """Return list of {username, id, filename, state} for failed downloads."""
     failed = []
     try:
-        all_downloads = client.transfers.get_all_downloads()
+        # includeRemoved=True fetches the full history, not just the active queue
+        all_downloads = client.transfers.get_all_downloads(includeRemoved=True)
     except Exception as e:
         log.error("Failed to fetch downloads: %s", e)
         return []
@@ -125,9 +126,7 @@ def get_failed_downloads(client: SlskdClient) -> list[dict]:
 def remove_failed(client: SlskdClient, username: str, file_id: str) -> bool:
     """Remove a failed download entry from slskd."""
     try:
-        client.transfers.cancel_and_remove_download(
-            username=username, id=file_id, remove=True
-        )
+        client.transfers.cancel_download(username=username, id=file_id, remove=True)
         return True
     except Exception as e:
         log.warning("Failed to remove %s / %s: %s", username, file_id, e)

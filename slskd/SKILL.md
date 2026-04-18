@@ -61,6 +61,7 @@ fi
 
 SPOTIFY_SCRIPT="$SKILL_DIR/scripts/spotify_info.py"
 SLSKD_SCRIPT="$SKILL_DIR/scripts/slskd_download.py"
+SLSKD_RETRY_SCRIPT="$SKILL_DIR/scripts/slskd_retry.py"
 ```
 
 ## Workflow
@@ -116,6 +117,35 @@ No FLAC or MP3 320+ found for "<title>". Best available was <best_found>. Not do
 ```
 Download failed: <error>
 ```
+
+## Retry failed downloads
+
+When the user invokes `/slskd retry` (optionally with `--dry-run`):
+
+```bash
+SLSKD_HOST="<slskd.host>" SLSKD_PORT="<slskd.port>" \
+  "$PYTHON_BIN" "$SKILL_DIR/scripts/slskd_retry.py"
+```
+
+Add `--dry-run` if the user asked to preview without downloading.
+
+The script:
+1. Fetches all transfers in `Errored` or `TimedOut` state
+2. Parses title and artist from each file's path
+3. Runs a fresh search for each (same quality floor: FLAC or MP3 ≥ 320 kbps)
+4. On success: queues the new file and removes the old failed entry
+5. On failure: leaves the failed entry in place
+
+**Report format:**
+
+For each result:
+- `success` → `Queued: <new_file> [FORMAT] from <user> — replaced failed <original_file>`
+- `no_match` → `No quality match for "<title>" (<reason>). Failed entry kept.`
+- `error` → `Error retrying "<title>": <reason>. Failed entry kept.`
+
+End with a summary line: `Retry complete: N succeeded, N failed, N no match (of N total).`
+
+If `total_failed` is 0: reply "No failed downloads found."
 
 ## Example
 

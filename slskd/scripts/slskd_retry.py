@@ -99,8 +99,7 @@ def get_failed_downloads(client: SlskdClient) -> list[dict]:
     """Return list of {username, id, filename, state} for failed downloads."""
     failed = []
     try:
-        # includeRemoved=True fetches the full history, not just the active queue
-        all_downloads = client.transfers.get_all_downloads(includeRemoved=True)
+        all_downloads = client.transfers.get_all_downloads()
     except Exception as e:
         log.error("Failed to fetch downloads: %s", e)
         return []
@@ -158,7 +157,20 @@ def main():
         sys.exit(1)
 
     failed = get_failed_downloads(client)
-    log.info("Found %d failed download(s)", len(failed))
+    log.info("Found %d failed download(s) in history", len(failed))
+
+    # Deduplicate: keep only the most recent failure per basename so we don't
+    # retry the same track N times when it has failed repeatedly in history.
+    seen_basenames: set[str] = set()
+    deduped = []
+    for entry in failed:
+        basename = entry["filename"].replace("\\", "/").split("/")[-1].lower()
+        if basename not in seen_basenames:
+            seen_basenames.add(basename)
+            deduped.append(entry)
+    if len(deduped) < len(failed):
+        log.info("Deduplicated to %d unique track(s)", len(deduped))
+    failed = deduped
 
     if not failed:
         print(json.dumps({"total_failed": 0, "succeeded": 0, "failed": 0, "results": []}))

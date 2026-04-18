@@ -60,8 +60,8 @@ except ImportError:
 
 from slskd_download import run as download_run, HOST, API_KEY, BETWEEN_SEARCH_DELAY_S
 
-# States considered "failed" — worth retrying
-FAILED_STATES = {"Errored", "TimedOut"}
+# Secondary states (after "Completed, ") worth retrying
+FAILED_STATES = {"Errored", "TimedOut", "Rejected"}
 
 
 def parse_title_artist(filepath: str) -> tuple[str, str]:
@@ -109,8 +109,8 @@ def get_failed_downloads(client: SlskdClient) -> list[dict]:
         for directory in user_group.get("directories", []):
             for f in directory.get("files", []):
                 state = f.get("state", "") or ""
-                # slskd state can be composite: "Errored, RetryExceeded"
-                state_key = state.split(",")[0].strip()
+                # slskd state is "Completed, <secondary>" — check secondary part
+                state_key = state.split(",")[-1].strip()
                 if state_key in FAILED_STATES:
                     failed.append({
                         "username": username,
